@@ -192,3 +192,4 @@ The Worker also answers a few routes via `fetch()` so you can test without waiti
 ## License
 
 MIT — feel free to use, modify, and share.
+# TelegramBot-CurrencyRate
