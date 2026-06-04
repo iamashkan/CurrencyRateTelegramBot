@@ -2,24 +2,12 @@
 
 A tiny, **serverless Telegram bot** that publishes **live foreign‑exchange, gold, and tether prices** to a Telegram channel — automatically, every 15 minutes, with a clean right‑to‑left (Persian) layout. It runs entirely on **Cloudflare Workers**, so there is no server to maintain and the running cost is effectively zero.
 
-![Architecture & Data Flow](docs/architecture.png)
-
 ---
 
 ## What it does
 
 Every 15 minutes the bot wakes up, fetches the latest prices from a public data source, compares each price to **last night's 23:00 baseline**, formats a tidy message, and posts it to the channel:
 
-```
-📊 نرخ لحظه‌ای بازار
-🕐 ۱۴۰۵/۰۳/۱۳ - ۱۵:۰۸
-━━━━━━━━━━━━━━━
-🔴 🇺🇸 دلار: ۱۷۳,۹۹۰  (-۴۳۵)
-🟢 🇬🇧 پوند: ۲۳۳,۷۳۰  (+۳۵۱)
-⚪️ 🥇 انس طلا: $۴,۴۵۰
-🔴 🥇 طلای ۱۸ عیار: ۱۸,۳۰۷,۶۰۰  (-۴۵,۷۶۹)
-━━━━━━━━━━━━━━━
-```
 
 * A coloured ball shows direction at a glance: 🟢 up, 🔴 down, ⚪️ no change / no baseline yet.
 * The number in parentheses is the **absolute change in toman** versus last night at 23:00 (USD for the gold ounce).
@@ -62,20 +50,6 @@ The whole program lives in [`worker.js`](worker.js). On each Cron tick, `handleS
 | Data source | **tgju.org** `ajax.json` | Free, complete, machine‑readable JSON (incl. daily high/low) |
 | Delivery | **Telegram Bot API** | Official, simple, secure (`sendMessage`, HTML parse mode) |
 | State | **Cloudflare KV** | Simple key–value store for the baseline & flags, with TTL |
-
----
-
-## Project structure
-
-```
-.
-├── worker.js                 # the entire bot (single file)
-├── wrangler.toml             # Cloudflare config (cron, KV binding)
-├── README.md
-└── docs/
-    ├── architecture.svg      # editable architecture diagram (source)
-    └── architecture.png      # rendered diagram (used in this README)
-```
 
 ---
 
