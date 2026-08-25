@@ -54,6 +54,17 @@ The whole program lives in [`worker.js`](worker.js). On each Cron tick, `handleS
 
 ---
 
+## A note on the data source
+
+Prices come from `tgju.org`'s `ajax.json` endpoint. That is an **unofficial** endpoint: it is
+not a documented public API, carries no stability or availability guarantee, and could change
+shape or disappear without notice. The bot is built defensively around that — it validates
+every response, skips the cycle rather than posting anything broken, and never corrupts the
+stored baseline on a bad read — but anyone reusing this should treat the source as a
+dependency they do not control.
+
+---
+
 ## Setup & deployment
 
 ### Prerequisites
