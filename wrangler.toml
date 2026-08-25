@@ -1,4 +1,4 @@
-name = "dollar-bot"
+name = "ramtin-bot"
 main = "worker.js"
 compatibility_date = "2024-01-01"
 
@@ -8,5 +8,13 @@ crons = ["*/15 * * * *"]
 [[kv_namespaces]]
 binding = "PRICE_STORE"
 
+[[durable_objects.bindings]]
+name = "TICKER"
+class_name = "Ticker"
 
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Ticker"]
 
+[observability]
+enabled = true

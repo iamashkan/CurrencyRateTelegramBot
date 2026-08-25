@@ -1,0 +1,12 @@
+# Wrangler local state
+.wrangler/
+
+# Secrets — never commit
+.trigger-key.txt
+.dev.vars
+
+# Local backups
+*.bak
+
+# macOS
+.DS_Store

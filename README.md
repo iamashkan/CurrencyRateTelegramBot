@@ -18,7 +18,8 @@ Once a day, at **23:00 Tehran time**, it sends an **end‑of‑day summary** (wi
 
 ## Features
 
-* ⏱ **Scheduled** — runs on a Cron trigger (`*/15 * * * *`), live updates from 08:00 to 22:45, nightly summary at 23:00 (Tehran time).
+* ⏱ **Scheduled** — live updates every 15 minutes from 08:00 to 22:45, nightly summary at 23:00 (Tehran time).
+* 🧷 **Two independent schedulers** — a Cron trigger *and* a Durable Object alarm. Cloudflare's cron service has gone silent for hours at a time without reporting an error; the alarm wakes every 5 minutes on its own chain and covers the gap, so a dead cron no longer means a dead channel.
 * 🧮 **Smart change tracking** — compares every price to the 23:00 baseline persisted in Cloudflare KV.
 * 🛡 **Never posts garbage** — if the data source returns nothing valid, the bot **skips** the cycle instead of posting an empty/broken message, and never corrupts the baseline.
 * 🔔 **Self‑monitoring** — on a source outage it sends the admin a private alert **once**, and a recovery notice when the source comes back (no spam).
@@ -118,15 +119,23 @@ All configuration lives at the top of [`worker.js`](worker.js):
 
 ---
 
-## HTTP endpoints (for testing)
+## HTTP endpoints
 
-The Worker also answers a few routes via `fetch()` so you can test without waiting for the cron:
+The Worker also answers a few routes via `fetch()`, so you can test or recover without waiting for a tick.
 
-| Route | Effect |
-|-------|--------|
-| `/preview` | Returns the live message as plain text — **does not send** to Telegram |
-| `/trigger` | Forces a live message to be sent now (bypasses working‑hours check) |
-| `/analysis` | Forces the end‑of‑day summary to be sent now |
+Every route except `/preview` requires the `TRIGGER_SECRET` — pass it as `?key=…` or an `X-Trigger-Key` header. Without a valid key they return **404**, so the channel can't be posted to by anyone who happens to know the Worker URL.
+
+| Route | Auth | Effect |
+|-------|------|--------|
+| `/preview` | — | Returns the live message as plain text — **does not send** to Telegram |
+| `/status` | 🔑 | Reports which scheduler is alive: current slot, last message, last cron tick, last alarm tick, next alarm |
+| `/cron` | 🔑 | Runs one normal tick (respects working hours and the slot lock) and re‑arms the alarm |
+| `/trigger` | 🔑 | Forces a live message to be sent now (bypasses working‑hours check) |
+| `/analysis` | 🔑 | Forces the end‑of‑day summary to be sent now |
+
+```bash
+wrangler secret put TRIGGER_SECRET
+```
 
 ---
 
@@ -144,6 +153,8 @@ The Worker also answers a few routes via `fetch()` so you can test without waiti
 
 * **Fail silently, not loudly** — the guiding principle: when data is suspect, skip rather than publish something wrong.
 * **Baseline integrity** — only valid (`> 0`) prices are written to the `last_night` snapshot, so a missing item never poisons tomorrow's comparison.
+* **One message per quarter‑hour** — each tick derives a slot key from the Tehran clock (`<date>-<hour>-<quarter>`) and a slot is only ever posted once. Cron and alarm can fire in the same window without producing a duplicate, and because the alarm is aligned to the wall clock, posts stay on :00/:15/:30/:45 instead of drifting.
+* **Self‑sustaining alarm** — the alarm schedules its next tick *before* doing any work, so a failure in one cycle can never break the chain.
 * **Idempotent summary** — a per‑day KV key (`analysis_sent_<date>`, with TTL) ensures the nightly summary is sent exactly once; the flag is set **only on success**, so a failed 23:00 tick is retried on the next tick within that hour.
 * **Bidi correctness** — every line starts with an RLM and numbers are wrapped in `LRI … PDI` isolates so signs and digits render correctly inside RTL text.
 
