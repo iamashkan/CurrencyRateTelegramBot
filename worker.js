@@ -4,6 +4,8 @@
 //  • ساعت ۲۳ هر شب: جمع‌بندی پایان روز + ذخیرهٔ مبنای فردا
 //  • هیچ‌وقت پیام خراب/خالی به کانال نمی‌رود
 //  • در صورت قطعی منبع، هشدار خصوصی به ادمین می‌رود (و هنگام وصل‌شدن، اطلاع)
+//  • دو زمان‌بند موازی (کرون + آلارمِ Durable Object) که هر دو از داخل همان
+//    Durable Object تیک می‌زنند، تا نه پیامی جا بیفتد و نه تکراری برود
 //
 //  چیدمان هر ردیف (راست‌چین):  توپ‌رنگی  پرچم  نام: قیمت  (تغییر)
 // ───────────────────────────────────────────────────────────────
@@ -26,17 +28,15 @@ export default {
       return json(await status(env));
     }
 
-    if (url.pathname === "/cron" || url.pathname === "/trigger" || url.pathname === "/analysis") {
+    if (url.pathname === "/cron" || url.pathname === "/seed" || url.pathname === "/trigger" || url.pathname === "/analysis") {
       if (!authorized(request, url, env)) return new Response("Not found", { status: 404 });
 
       // /cron : پشتیبانِ کرونِ کلادفلر — دقیقاً مثل یک تیک زمان‌بندی رفتار می‌کند
-      if (url.pathname === "/cron") {
-        const r = await handleSchedule(env);
-        await armTicker(env);
-        return json(r);
-      }
+      if (url.pathname === "/cron") return json(await runTick(env, "manual"));
+      // /seed : اسلات جاری را «ارسال‌شده» علامت می‌زند، بدون فرستادن پیام
+      if (url.pathname === "/seed") return json(await callTicker(env, "/arm?seed=now"));
       // /trigger : ارسال اجباری (برای تست دستی)
-      if (url.pathname === "/trigger") return json(await fetchAndSend(env, true));
+      if (url.pathname === "/trigger") return json(await fetchAndSend(env));
       return json(await sendAnalysis(env));
     }
 
@@ -44,9 +44,7 @@ export default {
   },
 
   async scheduled(event, env, ctx) {
-    ctx.waitUntil(beat(env, "last_cron_ms"));
-    ctx.waitUntil(handleSchedule(env));
-    ctx.waitUntil(armTicker(env)); // زمان‌بندِ پشتیبان همیشه مسلح بماند
+    ctx.waitUntil(runTick(env, "cron")); // از مسیر Ticker، تا با آلارم تصادف نکند
   },
 };
 
@@ -70,11 +68,6 @@ function safeEqual(a, b) {
   return diff === 0;
 }
 
-// ثبت ضربانِ هر زمان‌بند، برای اینکه در /status معلوم باشد کدام‌یک زنده است
-async function beat(env, key) {
-  try { await env.PRICE_STORE.put(key, String(Date.now())); } catch (e) {}
-}
-
 // شناسهٔ اسلاتِ ۱۵ دقیقه‌ایِ جاری به وقت تهران (مثل 2026-08-25-13-1 برای ۱۳:۱۵)
 // هر اسلات فقط یک پیام می‌گیرد؛ پس کرون و آلارمِ پشتیبان هرگز پیام تکراری نمی‌فرستند
 // و پیام‌ها دقیقاً سرِ :۰۰ / :۱۵ / :۳۰ / :۴۵ می‌مانند.
@@ -82,13 +75,7 @@ function slotKey() {
   const { hour, minute } = tehranNow();
   return `${tehranDateKey()}-${hour}-${Math.floor(minute / 15)}`;
 }
-async function slotAlreadySent(env, slot) {
-  try {
-    return (await env.PRICE_STORE.get("sent_slot")) === slot;
-  } catch (e) {
-    return false;
-  }
-}
+
 
 // قلم‌ها. ارزها ریالی‌اند → ÷۱۰ = تومان. انس طلا دلاری است (usd) → بدون تقسیم، با $.
 const ITEMS = [
@@ -353,23 +340,12 @@ async function updateHealth(env, result) {
 }
 
 // ===== ارسال نرخ لحظه‌ای =====
-async function fetchAndSend(env, force) {
-  if (!force && !isWorkingHours()) {
-    return { success: false, skipped: "خارج از ساعت کاری" };
-  }
-  const slot = slotKey();
-  if (!force && (await slotAlreadySent(env, slot))) {
-    return { success: false, skipped: "این ربع‌ساعت قبلاً ارسال شده" };
-  }
+async function fetchAndSend(env) {
   try {
     const { ok, validCount, prices } = await fetchAllPrices();
     if (!ok) return { success: false, error: "داده‌ی معتبری از منبع دریافت نشد؛ ارسال نشد" };
     const prev = await loadPrevious(env);
     await sendToTelegram(env.TELEGRAM_BOT_TOKEN, env.TELEGRAM_CHANNEL_ID, buildMessage(prices, prev), { silent: true });
-    try {
-      await env.PRICE_STORE.put("sent_slot", slot);
-      await env.PRICE_STORE.put("last_sent_ms", String(Date.now()));
-    } catch (e) {}
     return { success: true, validCount };
   } catch (error) {
     return { success: false, error: error.message };
@@ -388,31 +364,6 @@ async function sendAnalysis(env) {
   } catch (error) {
     return { success: false, error: error.message };
   }
-}
-
-// ===== مدیریت زمان‌بندی (هر ۱۵ دقیقه) =====
-async function handleSchedule(env) {
-  const { hour } = tehranNow();
-  let result;
-
-  if (hour === 23) {
-    const today = tehranDateKey();
-    if (await env.PRICE_STORE.get(`analysis_sent_${today}`)) {
-      return { skipped: true, reason: "analysis already sent today" };
-    }
-    result = await sendAnalysis(env);
-    // پرچم فقط در صورت موفقیت تا اگر خطا شد، تیک بعدیِ ساعت ۲۳ دوباره تلاش کند
-    if (result.success) {
-      await env.PRICE_STORE.put(`analysis_sent_${today}`, "1", { expirationTtl: 172800 });
-    }
-  } else if (isWorkingHours()) {
-    result = await fetchAndSend(env, false);
-  } else {
-    return { skipped: true };
-  }
-
-  await updateHealth(env, result);
-  return result;
 }
 
 // پاسخ JSON برای endpointها
@@ -445,57 +396,123 @@ export class Ticker {
 
   // فقط برای مسلح‌کردن آلارم (اگر خاموش بود)
   async fetch(request) {
+    const url = new URL(request.url);
+    const source = url.searchParams.get("source");
+    if (source === "cron") await this.state.storage.put("last_cron_ms", Date.now());
+
+    // نشاندن دستیِ نشانه — برای وقتی که اسلات جاری از قبل پیام گرفته
+    // (مثلاً بعد از یک دیپلوی) و نباید دوباره ارسال شود
+    const seed = url.searchParams.get("seed");
+    if (seed) await this.state.storage.put("claim", seed === "now" ? slotKey() : seed);
+
+    const result = url.pathname === "/tick" ? await this.tick() : null;
+
     let next = await this.state.storage.getAlarm();
     if (next === null) {
       next = nextTickAt();
       await this.state.storage.setAlarm(next);
     }
-    return new Response(JSON.stringify({ next_alarm_ms: next }), {
-      headers: { "Content-Type": "application/json" },
+    const [lastAlarm, lastCron, lastSent, claim] = await Promise.all([
+      this.state.storage.get("last_alarm_ms"),
+      this.state.storage.get("last_cron_ms"),
+      this.state.storage.get("last_sent_ms"),
+      this.state.storage.get("claim"),
+    ]);
+    return new Response(JSON.stringify({
+      result,
+      next_alarm_ms: next,
+      last_alarm_ms: lastAlarm || null,
+      last_cron_ms: lastCron || null,
+      last_sent_ms: lastSent || null,
+      claim: claim || null,
+    }), { headers: { "Content-Type": "application/json" } });
+  }
+
+  // یک تیک کامل. چون همیشه داخل همین Durable Object اجرا می‌شود،
+  // کرون و آلارم هرگز نمی‌توانند هم‌زمان یک اسلات را بردارند.
+  async tick() {
+    const { hour } = tehranNow();
+    let result;
+
+    if (hour === 23) {
+      // جمع‌بندی پایان روز: روزی یک بار
+      result = await this.claim(`analysis-${tehranDateKey()}`, () => sendAnalysis(this.env));
+    } else if (isWorkingHours()) {
+      result = await this.claim(slotKey(), () => fetchAndSend(this.env));
+    } else {
+      return { skipped: "خارج از ساعت کاری" };
+    }
+
+    await updateHealth(this.env, result);
+    return result;
+  }
+
+  // ادعای اتمیکِ یک اسلات. blockConcurrencyWhile تضمین می‌کند بین خواندن و
+  // نوشتنِ نشانه، هیچ تیک دیگری وسط نمی‌پرد — چیزی که KV نمی‌توانست تضمین کند.
+  async claim(id, run) {
+    const taken = await this.state.blockConcurrencyWhile(async () => {
+      if ((await this.state.storage.get("claim")) === id) return false;
+      await this.state.storage.put("claim", id);
+      return true;
     });
+    if (!taken) return { success: false, skipped: "قبلاً ارسال شده", claim: id };
+
+    try {
+      const result = await run();
+      if (result.success) await this.state.storage.put("last_sent_ms", Date.now());
+      // اگر ارسال نشد، نشانه را پس بده تا تیک بعدی دوباره تلاش کند
+      else await this.state.storage.delete("claim");
+      return result;
+    } catch (e) {
+      await this.state.storage.delete("claim");
+      return { success: false, error: String((e && e.message) || e) };
+    }
   }
 
   async alarm() {
     // اول زنجیره را ادامه بده تا هیچ خطایی آلارم بعدی را قطع نکند
     await this.state.storage.setAlarm(nextTickAt());
-    await beat(this.env, "last_alarm_ms");
+    await this.state.storage.put("last_alarm_ms", Date.now());
     try {
-      await handleSchedule(this.env);
+      await this.tick();
     } catch (e) { /* بی‌خیال؛ تیک بعدی دوباره تلاش می‌کند */ }
   }
 }
 
 // مطمئن شدن از اینکه آلارمِ پشتیبان مسلح است (بهترین‌تلاش)
-async function armTicker(env) {
+async function callTicker(env, path, source) {
   try {
     const id = env.TICKER.idFromName("main");
-    const r = await env.TICKER.get(id).fetch("https://ticker/arm");
+    const sep = path.includes("?") ? "&" : "?";
+    const url = `https://ticker${path}${source ? `${sep}source=${source}` : ""}`;
+    const r = await env.TICKER.get(id).fetch(url);
     return await r.json();
   } catch (e) {
-    return { error: String(e && e.message || e) };
+    return { error: String((e && e.message) || e) };
   }
 }
+// یک تیک را از داخل Ticker اجرا می‌کند (و ضمناً آلارم را مسلح نگه می‌دارد)
+const runTick = (env, source) => callTicker(env, "/tick", source);
+// فقط وضعیت را می‌خواند و آلارم را مسلح نگه می‌دارد
+const armTicker = env => callTicker(env, "/arm");
 
 // ===== وضعیت سلامت: کدام زمان‌بند زنده است و آخرین پیام کِی رفت =====
 async function status(env) {
   const now = Date.now();
   const ago = ms => (ms ? Math.round((now - Number(ms)) / 1000) : null);
-  const read = async k => { try { return await env.PRICE_STORE.get(k); } catch (e) { return null; } };
 
-  const [sent, cron, alarm] = await Promise.all([
-    read("last_sent_ms"), read("last_cron_ms"), read("last_alarm_ms"),
-  ]);
   const ticker = await armTicker(env);
   const { hour, minute } = tehranNow();
+  const slot = slotKey();
 
   return {
     tehran: `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`,
     working_hours: isWorkingHours(),
-    slot: slotKey(),
-    slot_sent: await slotAlreadySent(env, slotKey()),
-    last_message_sec_ago: ago(sent),
-    last_cron_tick_sec_ago: ago(cron),
-    last_alarm_tick_sec_ago: ago(alarm),
+    slot,
+    slot_sent: !!(ticker && ticker.claim === slot),
+    last_message_sec_ago: ago(ticker && ticker.last_sent_ms),
+    last_cron_tick_sec_ago: ago(ticker && ticker.last_cron_ms),
+    last_alarm_tick_sec_ago: ago(ticker && ticker.last_alarm_ms),
     next_alarm_in_sec: ticker && ticker.next_alarm_ms
       ? Math.round((Number(ticker.next_alarm_ms) - now) / 1000)
       : null,

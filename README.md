@@ -141,6 +141,7 @@ Every route except `/preview` requires the `TRIGGER_SECRET` — pass it as `?key
 | `/preview` | — | Returns the live message as plain text — **does not send** to Telegram |
 | `/status` | 🔑 | Reports which scheduler is alive: current slot, last message, last cron tick, last alarm tick, next alarm |
 | `/cron` | 🔑 | Runs one normal tick (respects working hours and the slot lock) and re‑arms the alarm |
+| `/seed` | 🔑 | Marks the current slot as already sent **without** posting — use after a deploy that resets the lock, so the slot isn't posted twice |
 | `/trigger` | 🔑 | Forces a live message to be sent now (bypasses working‑hours check) |
 | `/analysis` | 🔑 | Forces the end‑of‑day summary to be sent now |
 
@@ -164,8 +165,10 @@ wrangler secret put TRIGGER_SECRET
 
 * **Fail silently, not loudly** — the guiding principle: when data is suspect, skip rather than publish something wrong.
 * **Baseline integrity** — only valid (`> 0`) prices are written to the `last_night` snapshot, so a missing item never poisons tomorrow's comparison.
-* **One message per quarter‑hour** — each tick derives a slot key from the Tehran clock (`<date>-<hour>-<quarter>`) and a slot is only ever posted once. Cron and alarm can fire in the same window without producing a duplicate, and because the alarm is aligned to the wall clock, posts stay on :00/:15/:30/:45 instead of drifting.
+* **One message per quarter‑hour, enforced atomically** — each tick derives a slot key from the Tehran clock (`<date>-<hour>-<quarter>`) and claims it before sending; a claimed slot is never posted again. The claim lives in Durable Object storage and is taken inside `blockConcurrencyWhile`, so two ticks cannot both observe an unclaimed slot. An earlier version kept this lock in KV, where read‑then‑write is not atomic — cron and alarm fired in the same second, both saw the slot free, and the channel got a duplicate. Both schedulers now tick *through* the same Durable Object, which is the single point where that ordering can be guaranteed.
+* **Claim is released on failure** — if the send fails the claim is deleted, so the next tick retries the same slot rather than skipping it.
 * **Self‑sustaining alarm** — the alarm schedules its next tick *before* doing any work, so a failure in one cycle can never break the chain.
+* **Frugal with KV** — per‑tick bookkeeping (heartbeats, the slot claim) lives in Durable Object storage, not KV. KV holds only the nightly baseline and the source‑outage flag, which keeps the account near 2 writes/day against the free tier's 1,000. A previous version wrote a heartbeat to KV on every tick and sat at 50% of the daily cap, which triggered a limit warning email every day.
 * **Idempotent summary** — a per‑day KV key (`analysis_sent_<date>`, with TTL) ensures the nightly summary is sent exactly once; the flag is set **only on success**, so a failed 23:00 tick is retried on the next tick within that hour.
 * **Bidi correctness** — every line starts with an RLM and numbers are wrapped in `LRI … PDI` isolates so signs and digits render correctly inside RTL text.
 
