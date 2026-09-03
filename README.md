@@ -31,13 +31,13 @@ Once a day, at **23:00 Tehran time**, it sends an **end‑of‑day summary** (wi
 
 ## How it works
 
-The whole program lives in [`worker.js`](worker.js). On each Cron tick, `handleSchedule()` runs this pipeline:
+The whole program lives in [`worker.js`](worker.js). Every tick — whether it came from the Cron trigger or the backup alarm — runs inside the `Ticker` Durable Object, whose `tick()` claims the current slot and then runs this pipeline:
 
 1. **Fetch & validate** — `fetchAllPrices()` calls the data API and returns `{ ok, validCount, prices }`. If `ok` is `false` (network error, bad JSON, or no valid items), nothing is sent.
 2. **Normalize** — currencies are quoted in rial and divided by 10 to get toman; the gold ounce (`ons`) is already in USD and shown with a `$`.
 3. **Compare** — each price is diffed against the `last_night` baseline read from KV to pick the ball colour and the change amount.
 4. **Format** — `buildMessage()` / `buildAnalysis()` produce a right‑to‑left HTML message (bold prices, numeric Jalali date, clock).
-5. **Route** — at 23:00 it sends the summary and saves tomorrow's baseline (once per day); during working hours it sends a live update (silent); otherwise it stays quiet.
+5. **Route** — at 23:00 it sends the summary and saves tomorrow's baseline (once per day); during working hours it sends a live update (silent); otherwise it stays quiet. The claim taken in step 0 is what makes "once per day" and "once per quarter-hour" hold even when both schedulers fire together.
 6. **Health** — `updateHealth()` flips an `api_down` flag in KV and notifies the admin on outage/recovery.
 
 ---
@@ -125,7 +125,7 @@ All configuration lives at the top of [`worker.js`](worker.js):
 
 * **`ITEMS`** — the list of instruments to display. Each entry has a `key` (the field in the source JSON), an `icon`, a `name`, and an optional `usd: true` (for items priced in USD, like the gold ounce, which skips the ÷10 rial→toman conversion).
 * **`ADMIN_CHAT_ID`** — the numeric chat ID that receives private health alerts. ⚠️ The admin **must press *Start* on the bot once**, otherwise Telegram blocks the bot from messaging them (error 403).
-* **Working hours** — `isWorkingHours()` (08:00–22:59) and the `hour === 23` branch in `handleSchedule()`.
+* **Working hours** — `isWorkingHours()` (08:00–22:59) and the `hour === 23` branch in `Ticker.tick()`.
 * **Notifications** — the `silent` flag passed to `sendToTelegram()` (live = silent, summary = sound).
 
 ---
